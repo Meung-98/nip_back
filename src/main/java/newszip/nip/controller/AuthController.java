@@ -6,6 +6,7 @@ import newszip.nip.service.UserService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 
 // 회원가입 단계별 엔드포인트 제공하는 컨트롤러
 @RestController
@@ -18,7 +19,7 @@ public class AuthController {
         this.userService = userService;
     }
 
-    // OAUTH2_GOOGLE 회원가입 : 계정인증 후 2단계(선호 카테고리)로 이동
+    // OAuth2(Google) 회원가입: 1단계 입력 없이 바로 2단계(카테고리 선택)로 진행
     @PostMapping("/signup/oauth/google")
     public ResponseEntity<UserResponse> oauthGoogleSignup(
             @Valid @RequestBody OAuthSignupRequest request
@@ -34,6 +35,71 @@ public class AuthController {
     ) {
         LoginResponse response = userService.login(request);
         return ResponseEntity.ok(response);
+    }
+
+    // OAuth 소셜 로그인 (Google 등)
+    @PostMapping("/login/oauth")
+    public ResponseEntity<LoginResponse> loginOAuth(
+            @Valid @RequestBody OAuthLoginRequest request
+    ) {
+        LoginResponse response = userService.loginOAuth(request);
+        return ResponseEntity.ok(response);
+    }
+
+    // 액세스 토큰 재발급 (리프레시 토큰 기반)
+    @PostMapping("/refresh")
+    public ResponseEntity<LoginResponse> refresh(
+            @Valid @RequestBody RefreshTokenRequest request
+    ) {
+        LoginResponse response = userService.refreshToken(request);
+        return ResponseEntity.ok(response);
+    }
+
+    // 로그아웃: 리프레시 토큰 무효화
+    @PostMapping("/logout")
+    public ResponseEntity<Void> logout(@AuthenticationPrincipal org.springframework.security.core.userdetails.User principal) {
+        if (principal != null) {
+            userService.logout(principal.getUsername());
+        }
+        return ResponseEntity.ok().build();
+    }
+
+    // 이메일 인증 코드 발송 (사용자 ID 기반)
+    @PostMapping("/signup/{userId}/email/send-code")
+    public ResponseEntity<UserResponse> sendEmailCode(
+            @PathVariable Long userId
+    ) {
+        UserResponse response = userService.sendEmailVerificationCode(userId);
+        return ResponseEntity.ok(response);
+    }
+
+    // 이메일 인증 코드 확인 (사용자 ID 기반)
+    @PostMapping("/signup/{userId}/email/verify-code")
+    public ResponseEntity<UserResponse> verifyEmailCode(
+            @PathVariable Long userId,
+            @Valid @RequestBody VerifyEmailCodeRequest request
+    ) {
+        UserResponse response = userService.verifyEmailCode(userId, request);
+        return ResponseEntity.ok(response);
+    }
+
+    // 이메일 인증 코드 발송 (이메일 주소 기반 - 회원가입 전용)
+    @PostMapping("/signup/email/send-code")
+    public ResponseEntity<Void> sendEmailCodeByEmail(
+            @RequestParam String email
+    ) {
+        userService.sendEmailVerificationCodeByEmail(email);
+        return ResponseEntity.ok().build();
+    }
+
+    // 이메일 인증 코드 확인 (이메일 주소 기반 - 회원가입 전용)
+    @PostMapping("/signup/email/verify-code")
+    public ResponseEntity<Void> verifyEmailCodeByEmail(
+            @RequestParam String email,
+            @Valid @RequestBody VerifyEmailCodeRequest request
+    ) {
+        userService.verifyEmailCodeByEmail(email, request);
+        return ResponseEntity.ok().build();
     }
 
     // 회원가입 1 단계 : 회원정보 저장 및 ROLE_USER 부여

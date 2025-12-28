@@ -4,9 +4,7 @@ import jakarta.persistence.*;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
-import jakarta.validation.constraints.Size;
 import lombok.*;
-import org.hibernate.Length;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -40,10 +38,6 @@ public class User {
 
     @NotBlank(message = "비밀번호는 필수 입력값입니다.")
     @Column(nullable = false)
-    @Pattern(
-            regexp = "^(?=.*[A-Za-z])(?=.*\\d)(?=.*[!@#$%^&*()_+\\-=[\\]{};':\"\\\\|,.<>/?])[A-Za-z\\d!@#$%^&*()_+\\-=[\\]{};':\"\\\\|,.<>/?]{8,}$",
-            message = "비밀번호는 8자 이상이며 영문, 숫자, 특수문자를 모두 포함해야 합니다."
-    )
     private String password;
 
     @NotBlank
@@ -122,12 +116,6 @@ public class User {
     @Builder.Default
     @Column(nullable = false)
     private boolean emailOptIn = true;
-
-    // 이메일 인증코드
-    @Column(length = 6)
-    private String emailVerificationCode;
-    // 이메일 인증코드 만료 시각
-    private LocalDateTime emailVerificationExpiresAt;
 
     // 이메일 발송 가능 여부 : 인증완료 + 수신 동의
     public boolean canReceiveEmail() {

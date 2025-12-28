@@ -3,6 +3,8 @@ package newszip.nip.service;
 import newszip.nip.dto.*;
 import newszip.nip.model.*;
 import newszip.nip.repository.CategoryRepository;
+import newszip.nip.repository.EmailVerificationTokenRepository;
+import newszip.nip.repository.RefreshTokenRepository;
 import newszip.nip.repository.RoleRepository;
 import newszip.nip.repository.UserRepository;
 import newszip.nip.security.jwt.JwtTokenProvider;
@@ -15,6 +17,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
 
+import java.security.SecureRandom;
+import java.time.LocalDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -27,28 +32,50 @@ public class UserServiceImpl implements UserService{
     private final PasswordEncoder passwordEncoder;
     private final AuthenticationManager authenticationManager;
     private final JwtTokenProvider jwtTokenProvider;
+    private final EmailService emailService;
+    private final RefreshTokenRepository refreshTokenRepository;
+    private final EmailVerificationTokenRepository emailVerificationTokenRepository;
+    private final GoogleIdTokenVerifierService googleIdTokenVerifierService;
 
-    public UserServiceImpl(UserRepository userRepository, RoleRepository roleRepository, CategoryRepository categoryRepository, PasswordEncoder passwordEncoder, AuthenticationManager authenticationManager, JwtTokenProvider jwtTokenProvider) {
+    // 리프레시 토큰 유효기간 (일)
+    @org.springframework.beans.factory.annotation.Value("${auth.refresh-token-days:14}")
+    private long refreshTokenDays;
+
+    // 이메일 인증 코드 유효시간(분)
+    @org.springframework.beans.factory.annotation.Value("${auth.email-code-minutes:10}")
+    private long emailCodeMinutes;
+
+    // 이메일 인증 코드 재발송 쿨다운(초)
+    @org.springframework.beans.factory.annotation.Value("${auth.email-code-resend-seconds:60}")
+    private long emailCodeResendSeconds;
+
+    public UserServiceImpl(UserRepository userRepository, RoleRepository roleRepository, CategoryRepository categoryRepository, PasswordEncoder passwordEncoder, AuthenticationManager authenticationManager, JwtTokenProvider jwtTokenProvider, EmailService emailService, RefreshTokenRepository refreshTokenRepository, EmailVerificationTokenRepository emailVerificationTokenRepository, GoogleIdTokenVerifierService googleIdTokenVerifierService) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.categoryRepository = categoryRepository;
         this.passwordEncoder = passwordEncoder;
         this.authenticationManager = authenticationManager;
         this.jwtTokenProvider = jwtTokenProvider;
+        this.emailService = emailService;
+        this.refreshTokenRepository = refreshTokenRepository;
+        this.emailVerificationTokenRepository = emailVerificationTokenRepository;
+        this.googleIdTokenVerifierService = googleIdTokenVerifierService;
     }
 
-    // OAuth2 GOOGLE 회원가입 : 1단계 화면 없이 바로 2단계로 이동
+    // OAuth2(Google) 회원가입: 1단계 화면 없이 바로 STEP2로 이동
     @Override
     public UserResponse oauthSignupGoogle(OAuthSignupRequest request) {
         if (userRepository.existsByUserId(request.getUserId())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "이미 가입된 이메일입니다.");
         }
+
         Role userRole = roleRepository.findByRoleName("ROLE_USER")
                 .orElseThrow(() -> new ResponseStatusException(
-                        HttpStatus.INTERNAL_SERVER_ERROR, "기본 권한(USER)이 설정되어 있지 않습니다."
+                        HttpStatus.INTERNAL_SERVER_ERROR,
+                        "기본 권한(USER)이 설정되어 있지 않습니다."
                 ));
 
-        // OAuth2 사용자는 임의 강력 비밀번호를 생성하여 저장(패턴 충족)
+        // OAuth 사용자는 임의 강력 비밀번호를 생성하여 저장 (패턴 충족)
         String randomPassword = UUID.randomUUID().toString() + "!Aa1";
 
         User user = User.builder()
@@ -85,15 +112,26 @@ public class UserServiceImpl implements UserService{
                 ? request.getProvider()
                 : AuthProvider.STANDARD;
 
+        // phone이 null이거나 빈 문자열이면 null로 설정 (선택 입력)
+        String phone = (request.getPhone() == null || request.getPhone().trim().isEmpty())
+                ? null
+                : request.getPhone();
+
+        // 이메일 수신 동의 여부 (기본값: true)
+        boolean emailOptIn = request.getEmailOptIn() != null
+                ? request.getEmailOptIn()
+                : true;
+
         User user = User.builder()
                 .userId(request.getUserId())
                 .password(passwordEncoder.encode(request.getPassword()))
                 .username(request.getUsername())
                 .birthDate(request.getBirthDate())
-                .phone(request.getPhone())
+                .phone(phone)
                 .provider(provider)
                 .signupStep(SignupStep.STEP1)
                 .status(UserStatus.ACTIVE)
+                .emailOptIn(emailOptIn)
                 .build();
 
         user.getRoles().add(userRole);
@@ -201,6 +239,120 @@ public class UserServiceImpl implements UserService{
         return toResponse(saved);
     }
 
+    // 이메일 인증 코드 발송
+    @Override
+    public UserResponse sendEmailVerificationCode(Long userId) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "사용자를 찾을 수 없습니다."));
+
+        if (user.isEmailVerified()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "이미 이메일 인증을 완료한 사용자입니다.");
+        }
+
+        // 쿨다운 체크
+        LocalDateTime threshold = LocalDateTime.now().minusSeconds(emailCodeResendSeconds);
+        long recentCount = emailVerificationTokenRepository.countByEmailAndCreatedAtAfter(user.getUserId(), threshold);
+        if (recentCount > 0) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "잠시 후 다시 시도해 주세요. (재발송 쿨다운)");
+        }
+
+        String code = generateVerificationCode(6);
+        LocalDateTime expiresAt = LocalDateTime.now().plusMinutes(emailCodeMinutes);
+
+        EmailVerificationToken token = EmailVerificationToken.builder()
+                .email(user.getUserId())
+                .code(code)
+                .expiresAt(expiresAt)
+                .createdAt(LocalDateTime.now())
+                .consumed(false)
+                .build();
+        emailVerificationTokenRepository.save(token);
+
+        emailService.sendVerificationCode(user.getUserId(), code, emailCodeMinutes);
+
+        return toResponse(user);
+    }
+
+    // 이메일 인증 코드 발송 (이메일 주소 기반 - 회원가입 전용)
+    @Override
+    public void sendEmailVerificationCodeByEmail(String email) {
+        // 이미 가입된 이메일인지 확인
+        if (userRepository.existsByUserId(email)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "이미 가입된 이메일입니다.");
+        }
+
+        // 쿨다운 체크
+        LocalDateTime threshold = LocalDateTime.now().minusSeconds(emailCodeResendSeconds);
+        long recentCount = emailVerificationTokenRepository.countByEmailAndCreatedAtAfter(email, threshold);
+        if (recentCount > 0) {
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, "잠시 후 다시 시도해 주세요. (재발송 쿨다운)");
+        }
+
+        String code = generateVerificationCode(6);
+        LocalDateTime expiresAt = LocalDateTime.now().plusMinutes(emailCodeMinutes);
+
+        EmailVerificationToken token = EmailVerificationToken.builder()
+                .email(email)
+                .code(code)
+                .expiresAt(expiresAt)
+                .createdAt(LocalDateTime.now())
+                .consumed(false)
+                .build();
+        emailVerificationTokenRepository.save(token);
+
+        emailService.sendVerificationCode(email, code, emailCodeMinutes);
+    }
+
+    // 이메일 인증 코드 확인 (이메일 주소 기반 - 회원가입 전용)
+    @Override
+    public void verifyEmailCodeByEmail(String email, VerifyEmailCodeRequest request) {
+        EmailVerificationToken token = emailVerificationTokenRepository
+                .findTopByEmailAndCodeOrderByCreatedAtDesc(email, request.getCode().trim())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "인증 코드가 올바르지 않습니다."));
+
+        if (token.isConsumed()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "이미 사용된 인증 코드입니다.");
+        }
+
+        if (LocalDateTime.now().isAfter(token.getExpiresAt())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "인증 코드가 만료되었습니다. 코드를 다시 요청해 주세요.");
+        }
+
+        // 토큰 소비 처리
+        token.setConsumed(true);
+        emailVerificationTokenRepository.save(token);
+    }
+
+    // 이메일 인증 코드 검증
+    @Override
+    public UserResponse verifyEmailCode(Long userId, VerifyEmailCodeRequest request) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "사용자를 찾을 수 없습니다."));
+
+        if (user.isEmailVerified()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "이미 이메일 인증을 완료한 사용자입니다.");
+        }
+
+        EmailVerificationToken token = emailVerificationTokenRepository
+                .findTopByEmailAndCodeOrderByCreatedAtDesc(user.getUserId(), request.getCode())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "인증 코드가 올바르지 않습니다."));
+
+        if (token.isConsumed()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "이미 사용된 인증 코드입니다.");
+        }
+
+        if (token.isExpired(LocalDateTime.now())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "인증 코드가 만료되었습니다. 코드를 다시 요청해 주세요.");
+        }
+
+        user.setEmailVerified(true);
+        token.setConsumed(true);
+
+        User saved = userRepository.save(user);
+        emailVerificationTokenRepository.save(token);
+        return toResponse(saved);
+    }
+
     // STANDARD 로그인 : 자격 검증 후 JWT 발급
     @Override
     public LoginResponse login(LoginRequest request) {
@@ -221,11 +373,161 @@ public class UserServiceImpl implements UserService{
         }
 
         String token = jwtTokenProvider.generateToken(user.getUserId());
+        RefreshToken refreshToken = issueRefreshToken(user);
 
         return LoginResponse.builder()
                 .token(token)
+                .refreshToken(refreshToken.getToken())
                 .user(toResponse(user))
                 .build();
+    }
+
+    // 리프레시 토큰 재발급 및 액세스 토큰 갱신
+    @Override
+    public LoginResponse refreshToken(RefreshTokenRequest request) {
+        RefreshToken stored = refreshTokenRepository.findByToken(request.getRefreshToken())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "유효하지 않은 리프레시 토큰입니다."));
+
+        if (stored.isRevoked()) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "이미 사용된 리프레시 토큰입니다.");
+        }
+
+        if (LocalDateTime.now().isAfter(stored.getExpiresAt())) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "리프레시 토큰이 만료되었습니다.");
+        }
+
+        User user = stored.getUser();
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "비활성화된 사용자입니다.");
+        }
+
+        // 기존 토큰 폐기 후 새 토큰 발급 (회전)
+        stored.setRevoked(true);
+        refreshTokenRepository.save(stored);
+        RefreshToken newRefresh = issueRefreshToken(user);
+
+        String newAccessToken = jwtTokenProvider.generateToken(user.getUserId());
+        return LoginResponse.builder()
+                .token(newAccessToken)
+                .refreshToken(newRefresh.getToken())
+                .user(toResponse(user))
+                .build();
+    }
+
+    // 로그아웃: 해당 사용자의 리프레시 토큰 모두 무효화
+    @Override
+    public void logout(String userId) {
+        userRepository.findByUserId(userId).ifPresent(refreshTokenRepository::deleteByUser);
+    }
+
+    private RefreshToken issueRefreshToken(User user) {
+        // 기존 토큰 정리: 한 사용자당 하나만 유지
+        refreshTokenRepository.deleteByUser(user);
+
+        String tokenValue = generateRandomString(64);
+        RefreshToken refreshToken = RefreshToken.builder()
+                .token(tokenValue)
+                .user(user)
+                .expiresAt(LocalDateTime.now().plus(refreshTokenDays, ChronoUnit.DAYS))
+                .revoked(false)
+                .build();
+        return refreshTokenRepository.save(refreshToken);
+    }
+
+    private String generateRandomString(int length) {
+        final String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        SecureRandom random = new SecureRandom();
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            sb.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        }
+        return sb.toString();
+    }
+
+    // 소셜(OAuth) 로그인: provider 매칭, 없으면 자동 생성(STEP2 상태)
+    @Override
+    public LoginResponse loginOAuth(OAuthLoginRequest request) {
+        AuthProvider provider = request.getProvider();
+        if (provider == null || provider == AuthProvider.STANDARD) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "유효한 OAuth 공급자가 필요합니다.");
+        }
+
+        // Google ID 토큰 검증 (Google일 때 필수)
+        if (provider == AuthProvider.OAUTH_GOOGLE) {
+            if (request.getIdToken() == null || request.getIdToken().isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Google ID 토큰이 필요합니다.");
+            }
+            try {
+                var payload = googleIdTokenVerifierService.verify(request.getIdToken());
+                // ID 토큰의 이메일/이름/검증 여부를 신뢰값으로 사용
+                request = OAuthLoginRequest.builder()
+                        .userId(payload.getEmail())
+                        .username(payload.getName() == null ? payload.getEmail() : payload.getName())
+                        .provider(provider)
+                        .emailVerified(payload.isEmailVerified())
+                        .emailOptIn(request.getEmailOptIn())
+                        .build();
+            } catch (IllegalArgumentException ex) {
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "유효하지 않은 Google ID 토큰입니다.", ex);
+            }
+        }
+
+        Optional<User> existing = userRepository.findByUserId(request.getUserId());
+        User user;
+        if (existing.isPresent()) {
+            user = existing.get();
+            if (user.getProvider() != provider) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "다른 가입 방식으로 이미 등록된 이메일입니다.");
+            }
+            if (user.getStatus() != UserStatus.ACTIVE) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "비활성화된 사용자입니다.");
+            }
+        } else {
+            Role userRole = roleRepository.findByRoleName("ROLE_USER")
+                    .orElseThrow(() -> new ResponseStatusException(
+                            HttpStatus.INTERNAL_SERVER_ERROR,
+                            "기본 권한(USER)이 설정되어 있지 않습니다."
+                    ));
+
+            String randomPassword = generateRandomString(24) + "!Aa1";
+            boolean emailVerified = request.isEmailVerified();
+            boolean emailOptIn = request.getEmailOptIn() == null ? true : request.getEmailOptIn();
+            String username = request.getUsername() != null && !request.getUsername().isBlank()
+                    ? request.getUsername()
+                    : request.getUserId();
+
+            user = User.builder()
+                    .userId(request.getUserId())
+                    .password(passwordEncoder.encode(randomPassword))
+                    .username(username)
+                    .provider(provider)
+                    .signupStep(SignupStep.STEP2) // 카테고리 선택 대기 상태
+                    .status(UserStatus.ACTIVE)
+                    .emailVerified(emailVerified)
+                    .emailOptIn(emailOptIn)
+                    .build();
+            user.getRoles().add(userRole);
+            user = userRepository.save(user);
+        }
+
+        String accessToken = jwtTokenProvider.generateToken(user.getUserId());
+        RefreshToken refreshToken = issueRefreshToken(user);
+
+        return LoginResponse.builder()
+                .token(accessToken)
+                .refreshToken(refreshToken.getToken())
+                .user(toResponse(user))
+                .build();
+    }
+
+    private String generateVerificationCode(int length) {
+        final String alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        SecureRandom random = new SecureRandom();
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            sb.append(alphabet.charAt(random.nextInt(alphabet.length())));
+        }
+        return sb.toString();
     }
 }
 
