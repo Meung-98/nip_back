@@ -1,7 +1,5 @@
 package newszip.nip.dto;
 
-import jakarta.validation.constraints.Email;
-import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -16,9 +14,8 @@ import newszip.nip.model.AuthProvider;
 @AllArgsConstructor
 public class OAuthLoginRequest {
 
-    @Email
-    @NotBlank
-    private String userId;          // 이메일 (unique id)
+    // 이메일 (unique id) - 카카오/구글의 경우 토큰 검증 후 설정되므로 optional
+    private String userId;
 
     private String username;        // 표시 이름 (미제공 시 userId 사용)
 
@@ -29,7 +26,7 @@ public class OAuthLoginRequest {
     private AuthProvider provider;  // OAUTH_GOOGLE 등
 
     @Builder.Default
-    private boolean emailVerified = true; // 외부에서 이메일 검증을 보장했다고 가정
+    private Boolean emailVerified = true; // 외부에서 이메일 검증을 보장했다고 가정 (Boolean로 변경하여 null 허용)
 
     private Boolean emailOptIn;     // 선택값, null이면 기본 true
 }

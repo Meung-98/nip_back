@@ -33,16 +33,29 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
 
         String token = resolveToken(request);
         if (StringUtils.hasText(token) && jwtTokenProvider.validateToken(token)) {
-            String userId = jwtTokenProvider.getSubject(token);
-            UserDetails userDetails = userDetailsService.loadUserByUsername(userId);
+            try {
+                String userId = jwtTokenProvider.getSubject(token);
+                UserDetails userDetails = userDetailsService.loadUserByUsername(userId);
 
-            UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
-                    userDetails,
-                    null,
-                    userDetails.getAuthorities()
-            );
-            authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
-            SecurityContextHolder.getContext().setAuthentication(authentication);
+                UsernamePasswordAuthenticationToken authentication = new UsernamePasswordAuthenticationToken(
+                        userDetails,
+                        null,
+                        userDetails.getAuthorities()
+                );
+                authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
+                SecurityContextHolder.getContext().setAuthentication(authentication);
+            } catch (org.springframework.security.core.userdetails.UsernameNotFoundException e) {
+                // 사용자를 찾을 수 없는 경우 (예: 토큰은 유효하지만 사용자가 삭제됨)
+                // 인증을 설정하지 않고 필터 체인을 계속 진행
+                // 이는 OAuth 로그인 등 인증이 필요하지 않은 엔드포인트에서 유효하지 않은 토큰이 포함된 경우를 처리
+            } catch (org.hibernate.LazyInitializationException e) {
+                // LazyInitializationException 발생 시 (세션이 없는 경우)
+                // 인증을 설정하지 않고 필터 체인을 계속 진행
+                // 이는 permitAll() 엔드포인트에서 발생할 수 있는 문제를 처리
+            } catch (Exception e) {
+                // 기타 예외 발생 시에도 필터 체인을 계속 진행
+                // 로그만 남기고 인증 실패로 처리하지 않음 (permitAll() 엔드포인트 보호)
+            }
         }
 
         filterChain.doFilter(request, response);

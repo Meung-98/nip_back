@@ -36,6 +36,7 @@ public class UserServiceImpl implements UserService{
     private final RefreshTokenRepository refreshTokenRepository;
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
     private final GoogleIdTokenVerifierService googleIdTokenVerifierService;
+    private final KakaoTokenVerifierService kakaoTokenVerifierService;
 
     // 리프레시 토큰 유효기간 (일)
     @org.springframework.beans.factory.annotation.Value("${auth.refresh-token-days:14}")
@@ -49,7 +50,7 @@ public class UserServiceImpl implements UserService{
     @org.springframework.beans.factory.annotation.Value("${auth.email-code-resend-seconds:60}")
     private long emailCodeResendSeconds;
 
-    public UserServiceImpl(UserRepository userRepository, RoleRepository roleRepository, CategoryRepository categoryRepository, PasswordEncoder passwordEncoder, AuthenticationManager authenticationManager, JwtTokenProvider jwtTokenProvider, EmailService emailService, RefreshTokenRepository refreshTokenRepository, EmailVerificationTokenRepository emailVerificationTokenRepository, GoogleIdTokenVerifierService googleIdTokenVerifierService) {
+    public UserServiceImpl(UserRepository userRepository, RoleRepository roleRepository, CategoryRepository categoryRepository, PasswordEncoder passwordEncoder, AuthenticationManager authenticationManager, JwtTokenProvider jwtTokenProvider, EmailService emailService, RefreshTokenRepository refreshTokenRepository, EmailVerificationTokenRepository emailVerificationTokenRepository, GoogleIdTokenVerifierService googleIdTokenVerifierService, KakaoTokenVerifierService kakaoTokenVerifierService) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.categoryRepository = categoryRepository;
@@ -60,6 +61,7 @@ public class UserServiceImpl implements UserService{
         this.refreshTokenRepository = refreshTokenRepository;
         this.emailVerificationTokenRepository = emailVerificationTokenRepository;
         this.googleIdTokenVerifierService = googleIdTokenVerifierService;
+        this.kakaoTokenVerifierService = kakaoTokenVerifierService;
     }
 
     // OAuth2(Google) 회원가입: 1단계 화면 없이 바로 STEP2로 이동
@@ -472,6 +474,31 @@ public class UserServiceImpl implements UserService{
             }
         }
 
+        // 카카오 Access Token 검증 (카카오일 때 필수)
+        if (provider == AuthProvider.OAUTH_KAKAO) {
+            if (request.getIdToken() == null || request.getIdToken().isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "카카오 Access Token이 필요합니다.");
+            }
+            try {
+                var kakaoUserInfo = kakaoTokenVerifierService.verify(request.getIdToken());
+                String email = kakaoUserInfo.getEmail();
+                if (email == null || email.isBlank()) {
+                    // 카카오 이메일이 없는 경우, 카카오 ID를 기반으로 이메일 생성
+                    email = "kakao_" + kakaoUserInfo.getId() + "@kakao.temp";
+                }
+                String nickname = kakaoUserInfo.getNickname();
+                request = OAuthLoginRequest.builder()
+                        .userId(email)
+                        .username(nickname != null && !nickname.isBlank() ? nickname : email)
+                        .provider(provider)
+                        .emailVerified(kakaoUserInfo.isEmailVerified())
+                        .emailOptIn(request.getEmailOptIn())
+                        .build();
+            } catch (IllegalArgumentException ex) {
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "유효하지 않은 카카오 Access Token입니다.", ex);
+            }
+        }
+
         Optional<User> existing = userRepository.findByUserId(request.getUserId());
         User user;
         if (existing.isPresent()) {
@@ -490,7 +517,7 @@ public class UserServiceImpl implements UserService{
                     ));
 
             String randomPassword = generateRandomString(24) + "!Aa1";
-            boolean emailVerified = request.isEmailVerified();
+            boolean emailVerified = request.getEmailVerified() != null ? request.getEmailVerified() : true;
             boolean emailOptIn = request.getEmailOptIn() == null ? true : request.getEmailOptIn();
             String username = request.getUsername() != null && !request.getUsername().isBlank()
                     ? request.getUsername()
