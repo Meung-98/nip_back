@@ -7,6 +7,10 @@ public interface UserService {
 
     // OAuth2(Google) 회원가입 : 1단계 화면 없이 STEP2 상태로 생성
     UserResponse oauthSignupGoogle(OAuthSignupRequest request);
+    // OAuth2(Kakao) 회원가입 : 1단계 화면 없이 STEP2 상태로 생성
+    UserResponse oauthSignupKakao(OAuthSignupRequest request);
+    // OAuth2(Naver) 회원가입 : 1단계 화면 없이 STEP2 상태로 생성
+    UserResponse oauthSignupNaver(OAuthSignupRequest request);
     // 1 단계 : 회원 정보 저장 + ROLE 부여
     UserResponse signupStep1(SignupStep1Request request);
     // 2 단계 : 선호 카테고리 선택 및 가입 완료
@@ -31,4 +35,6 @@ public interface UserService {
     void logout(String userId);
     // 소셜(OAuth) 로그인: 프로필 수신 후 토큰 발급
     LoginResponse loginOAuth(OAuthLoginRequest request);
+    // 네이버 Authorization Code로 로그인
+    LoginResponse loginNaverWithCode(String code, String state, String redirectUri);
 }

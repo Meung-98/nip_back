@@ -37,6 +37,7 @@ public class UserServiceImpl implements UserService{
     private final EmailVerificationTokenRepository emailVerificationTokenRepository;
     private final GoogleIdTokenVerifierService googleIdTokenVerifierService;
     private final KakaoTokenVerifierService kakaoTokenVerifierService;
+    private final NaverTokenVerifierService naverTokenVerifierService;
 
     // 리프레시 토큰 유효기간 (일)
     @org.springframework.beans.factory.annotation.Value("${auth.refresh-token-days:14}")
@@ -50,7 +51,7 @@ public class UserServiceImpl implements UserService{
     @org.springframework.beans.factory.annotation.Value("${auth.email-code-resend-seconds:60}")
     private long emailCodeResendSeconds;
 
-    public UserServiceImpl(UserRepository userRepository, RoleRepository roleRepository, CategoryRepository categoryRepository, PasswordEncoder passwordEncoder, AuthenticationManager authenticationManager, JwtTokenProvider jwtTokenProvider, EmailService emailService, RefreshTokenRepository refreshTokenRepository, EmailVerificationTokenRepository emailVerificationTokenRepository, GoogleIdTokenVerifierService googleIdTokenVerifierService, KakaoTokenVerifierService kakaoTokenVerifierService) {
+    public UserServiceImpl(UserRepository userRepository, RoleRepository roleRepository, CategoryRepository categoryRepository, PasswordEncoder passwordEncoder, AuthenticationManager authenticationManager, JwtTokenProvider jwtTokenProvider, EmailService emailService, RefreshTokenRepository refreshTokenRepository, EmailVerificationTokenRepository emailVerificationTokenRepository, GoogleIdTokenVerifierService googleIdTokenVerifierService, KakaoTokenVerifierService kakaoTokenVerifierService, NaverTokenVerifierService naverTokenVerifierService) {
         this.userRepository = userRepository;
         this.roleRepository = roleRepository;
         this.categoryRepository = categoryRepository;
@@ -62,6 +63,7 @@ public class UserServiceImpl implements UserService{
         this.emailVerificationTokenRepository = emailVerificationTokenRepository;
         this.googleIdTokenVerifierService = googleIdTokenVerifierService;
         this.kakaoTokenVerifierService = kakaoTokenVerifierService;
+        this.naverTokenVerifierService = naverTokenVerifierService;
     }
 
     // OAuth2(Google) 회원가입: 1단계 화면 없이 바로 STEP2로 이동
@@ -86,6 +88,72 @@ public class UserServiceImpl implements UserService{
                 .username(request.getUsername())
                 .birthDate(request.getBirthDate())
                 .provider(AuthProvider.OAUTH_GOOGLE)
+                .signupStep(SignupStep.STEP2) // 바로 카테고리 선택 단계로 이동
+                .status(UserStatus.ACTIVE)
+                .emailOptIn(true) // 이메일 수신 동의 기본 true
+                .build();
+
+        user.getRoles().add(userRole);
+
+        User saved = userRepository.save(user);
+        return toResponse(saved);
+    }
+
+    // OAuth2(Kakao) 회원가입: 1단계 화면 없이 바로 STEP2로 이동
+    @Override
+    public UserResponse oauthSignupKakao(OAuthSignupRequest request) {
+        if (userRepository.existsByUserId(request.getUserId())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "이미 가입된 이메일입니다.");
+        }
+
+        Role userRole = roleRepository.findByRoleName("ROLE_USER")
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.INTERNAL_SERVER_ERROR,
+                        "기본 권한(USER)이 설정되어 있지 않습니다."
+                ));
+
+        // OAuth 사용자는 임의 강력 비밀번호를 생성하여 저장 (패턴 충족)
+        String randomPassword = UUID.randomUUID().toString() + "!Aa1";
+
+        User user = User.builder()
+                .userId(request.getUserId())
+                .password(passwordEncoder.encode(randomPassword))
+                .username(request.getUsername())
+                .birthDate(request.getBirthDate())
+                .provider(AuthProvider.OAUTH_KAKAO)
+                .signupStep(SignupStep.STEP2) // 바로 카테고리 선택 단계로 이동
+                .status(UserStatus.ACTIVE)
+                .emailOptIn(true) // 이메일 수신 동의 기본 true
+                .build();
+
+        user.getRoles().add(userRole);
+
+        User saved = userRepository.save(user);
+        return toResponse(saved);
+    }
+
+    // OAuth2(Naver) 회원가입: 1단계 화면 없이 바로 STEP2로 이동
+    @Override
+    public UserResponse oauthSignupNaver(OAuthSignupRequest request) {
+        if (userRepository.existsByUserId(request.getUserId())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "이미 가입된 이메일입니다.");
+        }
+
+        Role userRole = roleRepository.findByRoleName("ROLE_USER")
+                .orElseThrow(() -> new ResponseStatusException(
+                        HttpStatus.INTERNAL_SERVER_ERROR,
+                        "기본 권한(USER)이 설정되어 있지 않습니다."
+                ));
+
+        // OAuth 사용자는 임의 강력 비밀번호를 생성하여 저장 (패턴 충족)
+        String randomPassword = UUID.randomUUID().toString() + "!Aa1";
+
+        User user = User.builder()
+                .userId(request.getUserId())
+                .password(passwordEncoder.encode(randomPassword))
+                .username(request.getUsername())
+                .birthDate(request.getBirthDate())
+                .provider(AuthProvider.OAUTH_NAVER)
                 .signupStep(SignupStep.STEP2) // 바로 카테고리 선택 단계로 이동
                 .status(UserStatus.ACTIVE)
                 .emailOptIn(true) // 이메일 수신 동의 기본 true
@@ -499,6 +567,40 @@ public class UserServiceImpl implements UserService{
             }
         }
 
+        // 네이버 Access Token 검증 (네이버일 때 필수)
+        // 단, loginNaverWithCode에서 이미 검증한 경우 userId가 이미 설정되어 있으므로 건너뜀
+        if (provider == AuthProvider.OAUTH_NAVER) {
+            // userId가 이미 설정되어 있으면 loginNaverWithCode에서 이미 검증된 것으로 간주
+            if (request.getUserId() != null && !request.getUserId().isBlank()) {
+                // 이미 검증된 사용자 정보 사용
+            } else if (request.getIdToken() == null || request.getIdToken().isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "네이버 Access Token이 필요합니다.");
+            } else {
+                try {
+                    var naverUserInfo = naverTokenVerifierService.verify(request.getIdToken());
+                    String email = naverUserInfo.getEmail();
+                    if (email == null || email.isBlank()) {
+                        // 네이버 이메일이 없는 경우, 네이버 ID를 기반으로 이메일 생성
+                        email = "naver_" + naverUserInfo.getId() + "@naver.temp";
+                    }
+                    String name = naverUserInfo.getName();
+                    String nickname = naverUserInfo.getNickname();
+                    String username = nickname != null && !nickname.isBlank()
+                            ? nickname
+                            : (name != null && !name.isBlank() ? name : email);
+                    request = OAuthLoginRequest.builder()
+                            .userId(email)
+                            .username(username)
+                            .provider(provider)
+                            .emailVerified(naverUserInfo.isEmailVerified())
+                            .emailOptIn(request.getEmailOptIn())
+                            .build();
+                } catch (IllegalArgumentException ex) {
+                    throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "유효하지 않은 네이버 Access Token입니다.", ex);
+                }
+            }
+        }
+
         Optional<User> existing = userRepository.findByUserId(request.getUserId());
         User user;
         if (existing.isPresent()) {
@@ -555,6 +657,45 @@ public class UserServiceImpl implements UserService{
             sb.append(alphabet.charAt(random.nextInt(alphabet.length())));
         }
         return sb.toString();
+    }
+
+    // 네이버 Authorization Code로 로그인
+    @Override
+    public LoginResponse loginNaverWithCode(String code, String state, String redirectUri) {
+        // Authorization Code를 Access Token으로 교환
+        String accessToken;
+        try {
+            accessToken = naverTokenVerifierService.exchangeAuthorizationCode(code, state, redirectUri);
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, ex.getMessage(), ex);
+        }
+
+        // Access Token으로 사용자 정보 조회
+        try {
+            var naverUserInfo = naverTokenVerifierService.verify(accessToken);
+            String email = naverUserInfo.getEmail();
+            if (email == null || email.isBlank()) {
+                // 네이버 이메일이 없는 경우, 네이버 ID를 기반으로 이메일 생성
+                email = "naver_" + naverUserInfo.getId() + "@naver.temp";
+            }
+            String name = naverUserInfo.getName();
+            String nickname = naverUserInfo.getNickname();
+            String username = nickname != null && !nickname.isBlank()
+                    ? nickname
+                    : (name != null && !name.isBlank() ? name : email);
+
+            OAuthLoginRequest oauthRequest = OAuthLoginRequest.builder()
+                    .userId(email)
+                    .username(username)
+                    .provider(AuthProvider.OAUTH_NAVER)
+                    .emailVerified(naverUserInfo.isEmailVerified())
+                    .emailOptIn(true)
+                    .build();
+
+            return loginOAuth(oauthRequest);
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "유효하지 않은 네이버 Access Token입니다.", ex);
+        }
     }
 }
 
