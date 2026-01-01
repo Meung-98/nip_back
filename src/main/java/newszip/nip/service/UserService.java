@@ -17,6 +17,8 @@ public interface UserService {
     UserResponse signupStep2(Long userId, SignupStep2Request request);
     // 가입 상태 / 권한 / 선택 카테고리 조회
     UserResponse getUser(Long userId);
+    // userId(이메일)로 사용자 정보 조회
+    UserResponse getUserByUserId(String userId);
     // 이메일 수신 여부
     UserResponse updateEmailPreference(Long userId, EmailPreferenceRequest request);
     // 이메일 인증 코드 발송 (사용자 ID 기반)

@@ -259,6 +259,15 @@ public class UserServiceImpl implements UserService{
         return toResponse(user);
     }
 
+    // userId(이메일)로 사용자 정보 조회
+    @Override
+    @Transactional(readOnly = true)
+    public UserResponse getUserByUserId(String userId) {
+        User user = userRepository.findByUserId(userId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "사용자를 찾을 수 없습니다."));
+        return toResponse(user);
+    }
+
     // 엔티티 → 응답 DTO 변환
     private UserResponse toResponse(User user) {
         boolean isMember = user.getSignupStep() == SignupStep.COMPLETE;
