@@ -3,7 +3,6 @@ package newszip.nip.model;
 import jakarta.persistence.*;
 import jakarta.validation.constraints.Email;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.Pattern;
 import lombok.*;
 
 import java.time.LocalDate;
@@ -74,7 +73,7 @@ public class User {
 
     // 회원가입 2단계
     // 뉴스 카테고리 : 3개 선택 (중복 방지 Set 사용)
-    @ManyToMany(fetch = FetchType.LAZY)
+    @ManyToMany(fetch = FetchType.EAGER)
     @JoinTable(
             name = "user_categories",
             joinColumns = @JoinColumn(name = "user_id"),
@@ -124,7 +123,7 @@ public class User {
 
 
     // Role
-    @ManyToMany(fetch = FetchType.LAZY)
+    @ManyToMany(fetch = FetchType.EAGER)
     @JoinTable(
             name = "user_roles",
             joinColumns = @JoinColumn(name = "user_id"),

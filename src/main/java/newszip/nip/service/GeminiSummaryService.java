@@ -1,6 +1,8 @@
 package newszip.nip.service;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -20,8 +22,7 @@ import org.springframework.web.server.ResponseStatusException;
 @Slf4j
 public class GeminiSummaryService {
 
-    private static final int MAX_PROMPT_TEXT_LENGTH = 4000;
-    private static final String DEFAULT_MODEL = "gemini-1.5-flash"; // v1에서 지원되는 모델명
+    private static final String DEFAULT_MODEL = "gemini-1.5-flash-latest"; // API 기본 권장 모델
 
     @Value("${GEMINI_API_KEY:}")
     private String apiKey;
@@ -65,27 +66,45 @@ public class GeminiSummaryService {
     }
 
     private String callGemini(String prompt) {
-        String model = (geminiModel == null || geminiModel.isBlank()) ? DEFAULT_MODEL : geminiModel.trim();
-        try {
-            // 1차: v1beta
-            return callGeminiWithEndpoint(prompt, model, "v1beta");
-        } catch (RestClientResponseException ex) {
-            // 404 시 v1으로 재시도
-            if (ex.getStatusCode() == HttpStatus.NOT_FOUND) {
+        String configured = (geminiModel == null || geminiModel.isBlank()) ? DEFAULT_MODEL : geminiModel.trim();
+
+        // 시도할 모델 후보 리스트 (중복 제거를 위해 LinkedHashSet 사용)
+        LinkedHashSet<String> modelCandidates = new LinkedHashSet<>();
+        modelCandidates.add(configured);
+        if (configured.endsWith("-latest")) {
+            modelCandidates.add(configured.replace("-latest", "")); // latest 실패 시 기본명으로
+        } else {
+            modelCandidates.add(configured + "-latest"); // latest 버전도 시도
+        }
+        modelCandidates.add("gemini-1.5-flash"); // 안정적인 기본 모델 추가
+
+        List<String> apiVersions = List.of("v1beta", "v1");
+
+        List<String> errorMessages = new ArrayList<>();
+
+        for (String model : modelCandidates) {
+            for (String apiVersion : apiVersions) {
                 try {
-                    log.warn("Gemini 모델 404(v1beta) 발생, v1로 재시도: {}", model);
-                    return callGeminiWithEndpoint(prompt, model, "v1");
-                } catch (RestClientResponseException inner) {
-                    log.error("Gemini API 오류(v1 재시도): status={}, body={}", inner.getStatusCode(), inner.getResponseBodyAsString());
-                    throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Gemini 요약 요청이 실패했습니다.", inner);
+                    return callGeminiWithEndpoint(prompt, model, apiVersion);
+                } catch (RestClientResponseException ex) {
+                    String msg = String.format("모델 시도 실패 (%s/%s): status=%s, body=%s", apiVersion, model, ex.getStatusCode(), ex.getResponseBodyAsString());
+                    errorMessages.add(msg);
+                    log.warn(msg);
+                    // 404면 다른 버전/모델로 이어서 시도, 그 외는 즉시 중단
+                    if (ex.getStatusCode() != HttpStatus.NOT_FOUND) {
+                        throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Gemini 요약 요청이 실패했습니다.", ex);
+                    }
+                } catch (Exception ex) {
+                    String msg = String.format("모델 시도 중 예외 (%s/%s): %s", apiVersion, model, ex.getMessage());
+                    errorMessages.add(msg);
+                    log.warn(msg, ex);
                 }
             }
-            log.error("Gemini API 오류: status={}, body={}", ex.getStatusCode(), ex.getResponseBodyAsString());
-            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Gemini 요약 요청이 실패했습니다.", ex);
-        } catch (Exception ex) {
-            log.error("Gemini 요약 요청 중 예외 발생", ex);
-            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Gemini 요약 요청 중 오류가 발생했습니다.", ex);
         }
+
+        // 모든 시도가 실패한 경우
+        log.error("Gemini 모든 모델 시도가 실패했습니다. 시도 내역: {}", String.join(" | ", errorMessages));
+        throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, "Gemini 요약 요청이 실패했습니다.");
     }
 
     // 엔드포인트(v1beta/v1) 선택 호출
